@@ -126,12 +126,17 @@ namespace Aquamarine {
         Hyprutils::Memory::CWeakPointer<SDRMPlane>   self;
         bool                                         backSet = false;
         std::vector<SDRMFormat>                      formats;
+        // Formats eligible for asynchronous page flips (IN_FORMATS_ASYNC).
+        // When formatsAsyncKnown is false the driver does not expose a restriction.
+        std::vector<SDRMFormat> formatsAsync;
+        bool                    formatsAsyncKnown = false;
 
         union UDRMPlaneProps {
             struct {
                 uint32_t type;
-                uint32_t rotation;   // Not guaranteed to exist
-                uint32_t in_formats; // Not guaranteed to exist
+                uint32_t rotation;         // Not guaranteed to exist
+                uint32_t in_formats;       // Not guaranteed to exist
+                uint32_t in_formats_async; // Not guaranteed to exist
 
                 // atomic-modesetting only
 
@@ -151,7 +156,7 @@ namespace Aquamarine {
                 uint32_t in_fence_fd;
                 uint32_t color_range;
             } values;
-            uint32_t props[18] = {0};
+            uint32_t props[19] = {0};
         };
         UDRMPlaneProps props;
 
@@ -250,6 +255,8 @@ namespace Aquamarine {
         virtual bool                                                      pendingIdleFrame();
         virtual uint32_t                                                  commitCapabilities() const;
         virtual SCommitSubmission                                         commitAsync(const SCommitOptions& options);
+        virtual bool                                                      supportsTearing() const;
+        virtual bool                                                      supportsTearingFormat(uint32_t drmFormat, uint64_t modifier = DRM_FORMAT_MOD_INVALID) const;
         void                                                              releaseMgpuResources();
 
         int                                                               getConnectorID();
@@ -268,6 +275,7 @@ namespace Aquamarine {
         bool commitState(bool onlyTest = false);
         bool prepareAsyncCommitData(const COutputState::CSnapshot& snapshot, SDRMConnectorCommitData& data, Hyprutils::OS::CFileDescriptor& mgpuFence, bool& mgpuAcquired,
                                     bool& requiresSync);
+        void dropUnsupportedAsyncFlag(SDRMConnectorCommitData& data);
 
         Hyprutils::Memory::CWeakPointer<CDRMBackend>                 backend;
         Hyprutils::Memory::CSharedPointer<SDRMConnector>             connector;
@@ -280,7 +288,8 @@ namespace Aquamarine {
             Hyprutils::Memory::CSharedPointer<CSwapchain> cursorSwapchain;
         } mgpu;
 
-        bool                                                               lastCommitNoBuffer = true;
+        bool                                                               lastCommitNoBuffer           = true;
+        bool                                                               warnedUnsupportedAsyncFormat = false;
         uint64_t                                                           asyncOwnerID = 0, pendingAsyncCommit = 0;
         bool                                                               asyncCommitEventPending = false;
         Hyprutils::Memory::CAtomicSharedPointer<CDRMCursorPositionMailbox> cursorMailbox;

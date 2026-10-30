@@ -30,6 +30,14 @@ Aquamarine::IOutput::SCommitSubmission Aquamarine::IOutput::commitAsync(const SC
     };
 }
 
+bool Aquamarine::IOutput::supportsTearing() const {
+    return false;
+}
+
+bool Aquamarine::IOutput::supportsTearingFormat(uint32_t drmFormat, uint64_t modifier) const {
+    return false;
+}
+
 void Aquamarine::IOutput::moveCursor(const Hyprutils::Math::Vector2D& coord, bool skipSchedule) {
     ;
 }

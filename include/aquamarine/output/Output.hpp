@@ -139,7 +139,7 @@ namespace Aquamarine {
         void                  setHDRMetadata(const hdr_output_metadata& metadata);
         void                  setContentType(const uint16_t drmContentType);
         void                  setColorRange(eOutputColorRange range);
-        void                  setMaxBpc(uint8_t maxBpc); 
+        void                  setMaxBpc(uint8_t maxBpc);
 
       private:
         SInternalState           internalState;
@@ -257,16 +257,21 @@ namespace Aquamarine {
         virtual bool                                                      pendingIdleFrame() = 0;
         virtual uint32_t                                                  commitCapabilities() const;
         virtual SCommitSubmission                                         commitAsync(const SCommitOptions& options);
+        // Whether the output can present with asynchronous page flips at all.
+        virtual bool supportsTearing() const;
+        // Whether a buffer with the given format/modifier can be presented
+        // asynchronously. modifier may be DRM_FORMAT_MOD_INVALID to match any.
+        virtual bool              supportsTearingFormat(uint32_t drmFormat, uint64_t modifier = DRM_FORMAT_MOD_INVALID) const;
 
-        std::string                                                       name, description, make, model, serial;
-        SParsedEDID                                                       parsedEDID;
-        Hyprutils::Math::Vector2D                                         physicalSize;
-        bool                                                              enabled    = false;
-        bool                                                              nonDesktop = false;
-        eSubpixelMode                                                     subpixel   = AQ_SUBPIXEL_NONE;
-        bool                                                              vrrCapable = false, vrrActive = false;
-        bool                                                              needsFrame       = false;
-        bool                                                              supportsExplicit = false;
+        std::string               name, description, make, model, serial;
+        SParsedEDID               parsedEDID;
+        Hyprutils::Math::Vector2D physicalSize;
+        bool                      enabled    = false;
+        bool                      nonDesktop = false;
+        eSubpixelMode             subpixel   = AQ_SUBPIXEL_NONE;
+        bool                      vrrCapable = false, vrrActive = false;
+        bool                      needsFrame       = false;
+        bool                      supportsExplicit = false;
 
         //
         std::vector<Hyprutils::Memory::CSharedPointer<SOutputMode>> modes;

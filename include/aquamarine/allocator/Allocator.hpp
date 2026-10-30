@@ -12,6 +12,8 @@ namespace Aquamarine {
         Hyprutils::Math::Vector2D size;
         uint32_t                  format  = DRM_FORMAT_INVALID;
         bool                      scanout = false, cursor = false, multigpu = false;
+        // Restrict the modifier to ones the output can present with async flips.
+        bool tearing = false;
     };
 
     enum eAllocatorType {

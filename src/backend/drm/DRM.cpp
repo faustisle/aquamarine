@@ -1649,6 +1649,25 @@ Hyprutils::Memory::CWeakPointer<IBackendImplementation> Aquamarine::CDRMBackend:
     return primary;
 }
 
+static bool parsePlaneFormatModifiers(int fd, uint32_t blobID, std::vector<SDRMFormat>& out) {
+    auto blob = drmModeGetPropertyBlob(fd, blobID);
+    if (!blob)
+        return false;
+
+    drmModeFormatModifierIterator iter = {0};
+    while (drmModeFormatModifierBlobIterNext(blob, &iter)) {
+        auto it = std::ranges::find_if(out, [iter](const auto& e) { return e.drmFormat == iter.fmt; });
+
+        if (it == out.end())
+            out.emplace_back(SDRMFormat{.drmFormat = iter.fmt, .modifiers = {iter.mod}});
+        else
+            it->modifiers.emplace_back(iter.mod);
+    }
+
+    drmModeFreePropertyBlob(blob);
+    return true;
+}
+
 bool Aquamarine::SDRMPlane::init(drmModePlane* plane) {
     id = plane->plane_id;
 
@@ -1685,25 +1704,26 @@ bool Aquamarine::SDRMPlane::init(drmModePlane* plane) {
             return false;
         }
 
-        auto blob = drmModeGetPropertyBlob(backend->gpu->fd, blobID);
-        if (!blob) {
+        if (!parsePlaneFormatModifiers(backend->gpu->fd, blobID, formats)) {
             backend->backend->log(AQ_LOG_ERROR, "drm: Plane: No property");
             return false;
         }
+    }
 
-        drmModeFormatModifierIterator iter = {0};
-        while (drmModeFormatModifierBlobIterNext(blob, &iter)) {
-            auto it = std::ranges::find_if(formats, [iter](const auto& e) { return e.drmFormat == iter.fmt; });
-
-            TRACE(backend->backend->log(AQ_LOG_TRACE, std::format("drm: | Modifier 0x{:x} : {} with format {}", iter.mod, drmModifierToName(iter.mod), fourccToName(iter.fmt))));
-
-            if (it == formats.end())
-                formats.emplace_back(SDRMFormat{.drmFormat = iter.fmt, .modifiers = {iter.mod}});
-            else
-                it->modifiers.emplace_back(iter.mod);
+    if (props.values.in_formats_async) {
+        uint64_t blobID = 0;
+        if (!getDRMProp(backend->gpu->fd, id, props.values.in_formats_async, &blobID)) {
+            backend->backend->log(AQ_LOG_ERROR, "drm: Plane: No async formats blob id");
+            return false;
         }
 
-        drmModeFreePropertyBlob(blob);
+        if (!parsePlaneFormatModifiers(backend->gpu->fd, blobID, formatsAsync)) {
+            backend->backend->log(AQ_LOG_ERROR, "drm: Plane: No async formats property");
+            return false;
+        }
+
+        formatsAsyncKnown = true;
+        backend->backend->log(AQ_LOG_DEBUG, std::format("drm: Plane {} has {} async formats", id, formatsAsync.size()));
     }
 
     for (size_t i = 0; i < backend->crtcs.size(); ++i) {
@@ -2498,6 +2518,7 @@ bool Aquamarine::CDRMOutput::prepareAsyncCommitData(const COutputState::CSnapsho
     data.flags = DRM_MODE_PAGE_FLIP_EVENT;
     if (STATE.presentationMode == AQ_OUTPUT_PRESENTATION_IMMEDIATE)
         data.flags |= DRM_MODE_PAGE_FLIP_ASYNC;
+    dropUnsupportedAsyncFlag(data);
     if (STATE.committed & COutputState::AQ_OUTPUT_STATE_DAMAGE)
         data.damage = STATE.damage.copy();
     if (MODE->modeInfo)
@@ -2753,9 +2774,10 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
     if (COMMITTED & COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_HDR)
         data.hdrMetadata = STATE.hdrMetadata;
 
-    data.blocking  = BLOCKING || formatMismatch;
-    data.modeset   = NEEDS_RECONFIG || lastCommitNoBuffer || formatMismatch;
-    data.flags     = flags;
+    data.blocking = BLOCKING || formatMismatch;
+    data.modeset  = NEEDS_RECONFIG || lastCommitNoBuffer || formatMismatch;
+    data.flags    = flags;
+    dropUnsupportedAsyncFlag(data);
     data.test      = onlyTest;
     data.enabled   = STATE.enabled;
     data.committed = COMMITTED;
@@ -3064,6 +3086,56 @@ uint32_t Aquamarine::CDRMOutput::commitCapabilities() const {
     if (connector->crtc && connector->crtc->cursor)
         capabilities |= AQ_OUTPUT_COMMIT_CAPABILITY_LATE_CURSOR;
     return capabilities;
+}
+
+bool Aquamarine::CDRMOutput::supportsTearing() const {
+    return backend && backend->drmProps.supportsAsyncCommit && backend->atomic;
+}
+
+bool Aquamarine::CDRMOutput::supportsTearingFormat(uint32_t drmFormat, uint64_t modifier) const {
+    if (!supportsTearing() || !connector || !connector->crtc || !connector->crtc->primary)
+        return false;
+
+    const auto& PLANE = connector->crtc->primary;
+    if (!PLANE->formatsAsyncKnown)
+        return true;
+
+    return std::ranges::any_of(PLANE->formatsAsync, [drmFormat, modifier](const auto& format) {
+        return format.drmFormat == drmFormat && (modifier == DRM_FORMAT_MOD_INVALID || std::ranges::contains(format.modifiers, modifier));
+    });
+}
+
+void Aquamarine::CDRMOutput::dropUnsupportedAsyncFlag(SDRMConnectorCommitData& data) {
+    if (!(data.flags & DRM_MODE_PAGE_FLIP_ASYNC) || !data.mainFB)
+        return;
+
+    const auto ATTRS = data.mainFB->buffer->dmabuf();
+
+    // Async flips cannot change the scanout format or modifier: the hardware
+    // path used for them does not reprogram the plane for a new layout. Present
+    // one regular flip first, then the following frames can tear.
+    const auto PLANE = connector && connector->crtc ? connector->crtc->primary : nullptr;
+    if (PLANE && PLANE->front && PLANE->front->buffer) {
+        const auto FRONT_ATTRS = PLANE->front->buffer->dmabuf();
+        if (FRONT_ATTRS.success && ATTRS.success && (FRONT_ATTRS.format != ATTRS.format || FRONT_ATTRS.modifier != ATTRS.modifier)) {
+            data.flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
+            return;
+        }
+    }
+
+    if (!ATTRS.success || supportsTearingFormat(ATTRS.format, ATTRS.modifier)) {
+        warnedUnsupportedAsyncFormat = false;
+        return;
+    }
+
+    data.flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
+
+    if (!warnedUnsupportedAsyncFormat) {
+        backend->log(
+            AQ_LOG_WARNING,
+            std::format("drm: Buffer format {} (mod {}) is not async-flip capable, presenting synchronously", fourccToName(ATTRS.format), drmModifierToName(ATTRS.modifier)));
+        warnedUnsupportedAsyncFormat = true;
+    }
 }
 
 Aquamarine::IOutput::SCommitSubmission Aquamarine::CDRMOutput::commitAsync(const SCommitOptions& options) {

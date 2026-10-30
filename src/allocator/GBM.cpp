@@ -162,6 +162,24 @@ Aquamarine::CGBMBuffer::CGBMBuffer(const SAllocatorBufferParams& params, Hypruti
         explicitModifiers = {DRM_FORMAT_MOD_LINEAR};
     }
 
+    // Modern drivers only allow a subset of formats/modifiers to be flipped
+    // asynchronously. When the swapchain is used for tearing, drop modifiers the
+    // output cannot present asynchronously, otherwise the KMS commit would have
+    // to fall back to a synchronous, vblank-paced flip.
+    const auto SCANOUT_OUTPUT = swapchain->currentOptions().scanoutOutput;
+    if (params.tearing && params.scanout && !CURSOR && SCANOUT_OUTPUT && !explicitModifiers.empty()) {
+        auto asyncModifiers = explicitModifiers;
+        std::erase_if(asyncModifiers, [&](uint64_t mod) { return !SCANOUT_OUTPUT->supportsTearingFormat(attrs.format, mod); });
+
+        if (asyncModifiers.empty()) {
+            allocator->backend->log(AQ_LOG_WARNING,
+                                    std::format("GBM: No async-flip capable modifier for {}, tearing will use synchronous presentation", fourccToName(attrs.format)));
+        } else {
+            TRACE(allocator->backend->log(AQ_LOG_TRACE, std::format("GBM: Tearing enabled, keeping {} of {} modifiers", asyncModifiers.size(), explicitModifiers.size())));
+            explicitModifiers = std::move(asyncModifiers);
+        }
+    }
+
     uint32_t flags = GBM_BO_USE_RENDERING;
     if (params.scanout && !MULTIGPU)
         flags |= GBM_BO_USE_SCANOUT;
