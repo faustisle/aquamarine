@@ -180,6 +180,10 @@ namespace Aquamarine {
             std::optional<std::chrono::steady_clock::time_point> targetPresentation;
             // requires LATE_CURSOR when set. The cursor position is the only state allowed to change after commitAsync returns.
             bool lateCursor = false;
+            // Submit from the caller's thread instead of the commit thread. The ioctl is
+            // non-blocking, so this only skips a thread hand-off. The result is still
+            // delivered after commitAsync returns, as for every other submission.
+            bool immediate = false;
         };
 
         // rejection leaves pending output state untouched. Pending VRR or tearing state requires the corresponding capability.
@@ -262,6 +266,10 @@ namespace Aquamarine {
         // Whether a buffer with the given format/modifier can be presented
         // asynchronously. modifier may be DRM_FORMAT_MOD_INVALID to match any.
         virtual bool              supportsTearingFormat(uint32_t drmFormat, uint64_t modifier = DRM_FORMAT_MOD_INVALID) const;
+        // Allow frame events while a queued commit is still in flight. The
+        // compositor must then hold back the next commit until the flip
+        // completes; it is used to render the next frame during the current one.
+        virtual void              setPipelinedFrames(bool v);
 
         std::string               name, description, make, model, serial;
         SParsedEDID               parsedEDID;

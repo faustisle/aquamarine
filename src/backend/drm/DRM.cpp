@@ -523,14 +523,8 @@ void Aquamarine::CDRMBackend::dispatchCommitResults() {
         const auto CONNECTOR = data->connector;
         const auto CRTC      = CONNECTOR ? CONNECTOR->crtc : nullptr;
 
-        if (SUBMITTED && CONNECTOR && OUTPUT && CONNECTOR->output == OUTPUT) {
-            OUTPUT->state->internalState.drmFormat = data->commitData.outputState.drmFormat;
-            if (data->commitData.committed & COutputState::AQ_OUTPUT_STATE_EXPLICIT_OUT_FENCE)
-                OUTPUT->state->internalState.explicitOutFence = data->commitData.outputState.explicitOutFence;
-            CONNECTOR->applyCommit(data->commitData);
-            for (const auto& fb : data->commitData.retiredFBs)
-                CONNECTOR->releaseFBBuffer(fb);
-        }
+        if (SUBMITTED)
+            applyAsyncCommitResult(*data);
 
         if (!SUBMITTED)
             data->rollbackMgpu();
@@ -576,14 +570,48 @@ void Aquamarine::CDRMBackend::dispatchCommitResults() {
             continue;
         }
 
-        CRTC->pendingFlip.resultReady = true;
-        const auto EARLY              = CRTC->pendingFlip.early;
-        const auto FLIP_ID            = *CRTC->pendingFlip.id;
-        OUTPUT->events.commitResult.emit(commitResult);
-
-        if (EARLY.valid)
-            handlePageFlip(FLIP_ID, EARLY.seq, EARLY.sec, EARLY.usec, CRTC->id);
+        deliverCommitResult(OUTPUT, commitResult);
     }
+}
+
+void Aquamarine::CDRMBackend::deliverCommitResult(Hyprutils::Memory::CSharedPointer<CDRMOutput> output, const IOutput::SCommitResult& result) {
+    if (!output)
+        return;
+
+    const auto CONNECTOR = output->connector;
+    const auto CRTC      = CONNECTOR ? CONNECTOR->crtc : nullptr;
+
+    if (!CRTC || CRTC->pendingFlip.commitID != result.id) {
+        output->pendingAsyncCommit = 0;
+        output->events.commitResult.emit(result);
+        return;
+    }
+
+    CRTC->pendingFlip.resultReady = true;
+    const auto EARLY              = CRTC->pendingFlip.early;
+    const auto FLIP_ID            = *CRTC->pendingFlip.id;
+    output->events.commitResult.emit(result);
+
+    // the flip finished before the submission was reported; replay its event now
+    // so presentation still follows the commit result.
+    if (EARLY.valid)
+        handlePageFlip(FLIP_ID, EARLY.seq, EARLY.sec, EARLY.usec, CRTC->id);
+}
+
+void Aquamarine::CDRMBackend::applyAsyncCommitResult(CDRMAsyncCommitData& data) {
+    const auto OUTPUT    = data.output;
+    const auto CONNECTOR = data.connector;
+
+    if (!CONNECTOR || !OUTPUT || CONNECTOR->output != OUTPUT)
+        return;
+
+    OUTPUT->state->internalState.drmFormat = data.commitData.outputState.drmFormat;
+    if (data.commitData.committed & COutputState::AQ_OUTPUT_STATE_EXPLICIT_OUT_FENCE)
+        OUTPUT->state->internalState.explicitOutFence = data.commitData.outputState.explicitOutFence;
+
+    CONNECTOR->applyCommit(data.commitData);
+    for (const auto& fb : data.commitData.retiredFBs)
+        CONNECTOR->releaseFBBuffer(fb);
 }
 
 void Aquamarine::CDRMBackend::log(eBackendLogLevel l, const std::string& s) {
@@ -1408,6 +1436,7 @@ uintptr_t Aquamarine::SDRMCRTC::armPageFlip(CWeakPointer<SDRMConnector> connecto
     pendingFlip.commitID    = commitID;
     pendingFlip.resultReady = resultReady;
     pendingFlip.early.valid = false;
+    pendingFlip.armedAt     = std::chrono::steady_clock::now();
 
     return pendingFlip.id.value();
 }
@@ -1419,6 +1448,23 @@ void Aquamarine::SDRMCRTC::disarmPageFlip() {
     pendingFlip.commitID    = 0;
     pendingFlip.resultReady = true;
     pendingFlip.early.valid = false;
+    pendingFlip.armedAt     = std::chrono::steady_clock::time_point::min();
+}
+
+bool Aquamarine::SDRMCRTC::pendingFlipOverdue() const {
+    if (!pendingFlip.id || pendingFlip.armedAt == std::chrono::steady_clock::time_point::min())
+        return false;
+
+    double refreshHz = 60.0;
+    if (const auto CONNECTOR = pendingFlip.connector.lock(); CONNECTOR && CONNECTOR->refresh > 0)
+        refreshHz = CONNECTOR->refresh / 1000.0;
+
+    // Two missing refreshes is already far past a healthy flip; keep a floor so
+    // slow panels and a modeset right after arming are not mistaken for a stall.
+    const auto TIMEOUT_NS = std::max(2.0 / refreshHz, 0.1);
+    const auto TIMEOUT    = std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(TIMEOUT_NS));
+
+    return std::chrono::steady_clock::now() - pendingFlip.armedAt > TIMEOUT;
 }
 
 static CWeakPointer<CDRMBackend> gDispatchingBackend;
@@ -2354,6 +2400,14 @@ void Aquamarine::SDRMConnector::onPresent(bool primary, bool cursor, DRMFBList* 
 }
 
 Aquamarine::CDRMOutput::~CDRMOutput() {
+    // A pending commit event never reaches the output once it is gone; drop the
+    // counter here or no commit result could ever be dispatched again.
+    if (asyncCommitEventPending) {
+        asyncCommitEventPending = false;
+        if (backend && backend->m_pendingAsyncCommitEvents > 0)
+            --backend->m_pendingAsyncCommitEvents;
+    }
+
     if (backend)
         backend->cancelAsyncOutput(this);
     if (backend && backend->backend)
@@ -2633,8 +2687,20 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
         }
 
         if (STATE.enabled && (COMMITTED & COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_BUFFER) && connector->sched.frameInFlight()) {
-            backend->backend->log(AQ_LOG_ERROR, "drm: Cannot commit when a page-flip is awaiting");
-            return false;
+            // A flip whose completion event never arrives (lost interrupt, driver
+            // bug, flip dropped by the kernel) would wedge this output forever:
+            // every commit bounces off this check while the compositor keeps
+            // retrying. Once the flip is clearly overdue, drop it and let this
+            // commit take over the CRTC.
+            if (connector->crtc->pendingFlipOverdue()) {
+                backend->backend->log(AQ_LOG_WARNING, std::format("drm: page-flip on {} never completed, discarding it", name));
+                connector->invalidateFrame();
+            } else {
+                // Not an error: the flip is still in flight and the caller retries
+                // when its completion event arrives.
+                backend->backend->log(AQ_LOG_DEBUG, "drm: Cannot commit when a page-flip is awaiting");
+                return false;
+            }
         }
 
         if (STATE.enabled && (COMMITTED & COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_BUFFER))
@@ -3005,7 +3071,7 @@ void Aquamarine::CDRMOutput::scheduleFrame(const scheduleFrameReason reason) {
                 return;
 
             connector->sched.setFrameScheduled(false);
-            if (connector->sched.frameInFlight() || connector->sched.frameRunning())
+            if (!connector->sched.canSchedule())
                 return;
 
             CFrameRunningGuard frameRunning(connector->sched);
@@ -3092,6 +3158,13 @@ bool Aquamarine::CDRMOutput::supportsTearing() const {
     return backend && backend->drmProps.supportsAsyncCommit && backend->atomic;
 }
 
+void Aquamarine::CDRMOutput::setPipelinedFrames(bool v) {
+    if (!connector)
+        return;
+
+    connector->sched.setAllowFrameWhilePending(v);
+}
+
 bool Aquamarine::CDRMOutput::supportsTearingFormat(uint32_t drmFormat, uint64_t modifier) const {
     if (!supportsTearing() || !connector || !connector->crtc || !connector->crtc->primary)
         return false;
@@ -3106,8 +3179,27 @@ bool Aquamarine::CDRMOutput::supportsTearingFormat(uint32_t drmFormat, uint64_t 
 }
 
 void Aquamarine::CDRMOutput::dropUnsupportedAsyncFlag(SDRMConnectorCommitData& data) {
-    if (!(data.flags & DRM_MODE_PAGE_FLIP_ASYNC) || !data.mainFB)
+    if (!(data.flags & DRM_MODE_PAGE_FLIP_ASYNC))
         return;
+
+    // A modeset (or a disable) reprograms the CRTC. The kernel rejects async
+    // flips on such commits, and there is nothing to tear anyway.
+    if (!data.mainFB || !data.enabled || data.modeset) {
+        data.flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
+        return;
+    }
+
+    // Enabling or disabling any plane changes the active plane mask, which the
+    // kernel also rejects for async flips. Aquamarine only ever toggles the
+    // cursor plane outside of modesets, so check that one.
+    if (connector && connector->crtc && connector->crtc->cursor) {
+        const bool CUR_CURSOR_PLANE  = connector->crtc->cursor->front && !connector->crtc->cursor->front->dead;
+        const bool NEXT_CURSOR_PLANE = data.cursorVisible && data.cursorFB && !data.cursorFB->dead;
+        if (CUR_CURSOR_PLANE != NEXT_CURSOR_PLANE) {
+            data.flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
+            return;
+        }
+    }
 
     const auto ATTRS = data.mainFB->buffer->dmabuf();
 
@@ -3223,8 +3315,57 @@ Aquamarine::IOutput::SCommitSubmission Aquamarine::CDRMOutput::commitAsync(const
         asyncData->cursorHotspot = cursorHotspot;
     }
 
-    auto* asyncDataPtr          = asyncData.get();
-    auto  request               = makeUnique<SDRMCommitThreadRequest>();
+    auto* asyncDataPtr = asyncData.get();
+
+    if (options.immediate) {
+        // Tearing wants the frame at KMS as soon as rendering is done. The commit
+        // thread adds a wakeup and a queue hop to every flip, so submit from this
+        // thread instead: the ioctl is non-blocking and never waits on the previous
+        // flip.
+        //
+        // The result still has to be reported after commitAsync returns, and the
+        // page-flip event has to stay behind it so presentation is never seen
+        // before its submission. Arm with resultReady=false to stash an early
+        // event, then replay it from the deferred result.
+        const auto COMMIT_ID = backend->commitThread->nextCommitID();
+        connector->crtc->armPageFlip(connector, asyncDataPtr->tearing, asyncDataPtr->flipID, COMMIT_ID, false);
+
+        const auto RESULT = asyncDataPtr->submit(backend->gpu->fd, COMMIT_ID);
+        if (!RESULT.submitted) {
+            connector->crtc->disarmPageFlip();
+            atomicImpl->finalizeAsync(*asyncDataPtr->request, connector, asyncDataPtr->commitData, false);
+            const auto ERROR = RESULT.error ? RESULT.error : EIO;
+            backend->log(AQ_LOG_ERROR, std::format("drm: Immediate commit failed on {}: {}", name, strerror(ERROR)));
+            return {.error = ERROR};
+        }
+
+        asyncDataPtr->mgpuAcquired = false;
+        atomicImpl->finalizeAsync(*asyncDataPtr->request, connector, asyncDataPtr->commitData, true);
+        backend->applyAsyncCommitResult(*asyncDataPtr);
+
+        pendingAsyncCommit = COMMIT_ID;
+        lastCommitNoBuffer = false;
+        needsFrame         = false;
+        connector->sched.onFrameSubmitted();
+        state->consume(*asyncDataPtr->snapshot);
+
+        backend->backend->addIdleEvent(makeShared<std::function<void(void)>>([output = self.lock(), drmBackend = backend, commitID = COMMIT_ID] {
+            if (!output || !drmBackend)
+                return;
+
+            drmBackend->deliverCommitResult(output,
+                                            IOutput::SCommitResult{
+                                                .id           = commitID,
+                                                .status       = IOutput::AQ_OUTPUT_COMMIT_SUBMITTED,
+                                                .error        = 0,
+                                                .missedTarget = false,
+                                            });
+        }));
+
+        return {.id = COMMIT_ID};
+    }
+
+    auto request                = makeUnique<SDRMCommitThreadRequest>();
     request->ownerID            = asyncOwnerID;
     request->queueKey           = connector->crtc->id;
     request->targetPresentation = options.targetPresentation;

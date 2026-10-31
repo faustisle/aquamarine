@@ -182,6 +182,7 @@ namespace Aquamarine {
             bool                                           async       = false; // PAGE_FLIP_ASYNC
             uint64_t                                       commitID    = 0;
             bool                                           resultReady = true;
+            std::chrono::steady_clock::time_point          armedAt     = std::chrono::steady_clock::time_point::min();
 
             struct {
                 bool         valid = false;
@@ -194,6 +195,8 @@ namespace Aquamarine {
         uintptr_t armPageFlip(Hyprutils::Memory::CWeakPointer<SDRMConnector> connector, bool async, std::optional<uintptr_t> id = std::nullopt, uint64_t commitID = 0,
                               bool resultReady = true);
         void      disarmPageFlip();
+        // true when the armed flip has been waiting far longer than a refresh.
+        bool pendingFlipOverdue() const;
 
         struct {
             int gammaSize = 0;
@@ -257,6 +260,7 @@ namespace Aquamarine {
         virtual SCommitSubmission                                         commitAsync(const SCommitOptions& options);
         virtual bool                                                      supportsTearing() const;
         virtual bool                                                      supportsTearingFormat(uint32_t drmFormat, uint64_t modifier = DRM_FORMAT_MOD_INVALID) const;
+        virtual void                                                      setPipelinedFrames(bool v);
         void                                                              releaseMgpuResources();
 
         int                                                               getConnectorID();
@@ -499,6 +503,8 @@ namespace Aquamarine {
 
         void                                                               dispatchCommitResults();
         void                                                               handlePageFlip(uintptr_t flipID, unsigned int seq, unsigned int sec, unsigned int usec, uint32_t crtcID);
+        void                                                               applyAsyncCommitResult(CDRMAsyncCommitData& data);
+        void deliverCommitResult(Hyprutils::Memory::CSharedPointer<CDRMOutput> output, const IOutput::SCommitResult& result);
 
       private:
         CDRMBackend(Hyprutils::Memory::CSharedPointer<CBackend> backend);

@@ -74,6 +74,9 @@ namespace Aquamarine {
         ~CDRMCommitThread();
 
         std::optional<uint64_t> enqueue(Hyprutils::Memory::CUniquePointer<SDRMCommitThreadRequest>&& request);
+        // Allocates an id from the same sequence as enqueue() so inline submissions
+        // can never collide with a queued one.
+        uint64_t                nextCommitID();
         size_t                  cancelOwner(uint64_t ownerID);
         bool                    pauseQueue(uint64_t queueKey);
         bool                    resumeQueue(uint64_t queueKey);
@@ -107,6 +110,7 @@ namespace Aquamarine {
 
         void                                                                    run();
         void                                                                    stop();
+        uint64_t                                                                allocCommitIDLocked();
         Hyprutils::Memory::CUniquePointer<SDRMCommitThreadRequest>              takeNextRequest(std::unique_lock<std::mutex>& lock);
         void                                                                    appendResult(SResult&& result);
         void                                                                    signalResults();

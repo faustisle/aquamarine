@@ -38,6 +38,10 @@ bool Aquamarine::IOutput::supportsTearingFormat(uint32_t drmFormat, uint64_t mod
     return false;
 }
 
+void Aquamarine::IOutput::setPipelinedFrames(bool v) {
+    ;
+}
+
 void Aquamarine::IOutput::moveCursor(const Hyprutils::Math::Vector2D& coord, bool skipSchedule) {
     ;
 }

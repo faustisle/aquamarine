@@ -22,7 +22,15 @@ bool CFrameScheduler::frameInFlight() const {
 }
 
 bool CFrameScheduler::canSchedule() const {
-    return !m_pending && !m_frameRunning && !m_frameScheduled;
+    return (!m_pending || m_allowWhilePending) && !m_frameRunning && !m_frameScheduled;
+}
+
+void CFrameScheduler::setAllowFrameWhilePending(bool v) {
+    m_allowWhilePending = v;
+}
+
+bool CFrameScheduler::allowFrameWhilePending() const {
+    return m_allowWhilePending;
 }
 
 bool CFrameScheduler::frameScheduled() const {

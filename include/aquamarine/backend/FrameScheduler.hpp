@@ -32,6 +32,13 @@ namespace Aquamarine {
         // may a new frame be scheduled? (does not consider output enabled state)
         bool canSchedule() const;
 
+        // Allow a frame event while a commit is still in flight. The compositor can
+        // then render ahead and submit at flip-done, instead of idling for a whole
+        // refresh after every page flip. Only meaningful for queued/async commits,
+        // where the compositor defers the actual commit until the flip completes.
+        void setAllowFrameWhilePending(bool v);
+        bool allowFrameWhilePending() const;
+
         // State accessors. setFrameScheduled / frameScheduled() drive the idle-frame
         // loop; setFrameRunning / frameRunning() guard event emission on completion.
         bool frameScheduled() const;
@@ -53,6 +60,7 @@ namespace Aquamarine {
         bool m_frameScheduled      = false;
         bool m_frameRunning        = false;
         bool m_rescheduleRequested = false;
+        bool m_allowWhilePending   = false;
 
         friend class CFrameRunningGuard;
     };

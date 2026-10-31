@@ -78,6 +78,19 @@ std::optional<uint64_t> Aquamarine::CDRMCommitThread::enqueue(CUniquePointer<SDR
     return commitID;
 }
 
+uint64_t Aquamarine::CDRMCommitThread::allocCommitIDLocked() {
+    ++m_lastCommitID;
+    if (m_lastCommitID == 0)
+        ++m_lastCommitID;
+
+    return m_lastCommitID;
+}
+
+uint64_t Aquamarine::CDRMCommitThread::nextCommitID() {
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    return allocCommitIDLocked();
+}
+
 size_t Aquamarine::CDRMCommitThread::cancelOwner(uint64_t ownerID) {
     if (ownerID == 0)
         return 0;
