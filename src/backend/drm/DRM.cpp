@@ -3264,10 +3264,10 @@ Aquamarine::IOutput::SCommitSubmission Aquamarine::CDRMOutput::commitAsync(const
     if (SNAPSHOT.error())
         return {.error = SNAPSHOT.error()};
 
-    const auto&        STATE     = SNAPSHOT.state();
-    const auto         COMMITTED = STATE.committed;
-    constexpr uint32_t ASYNC_PROPERTIES =
-        COutputState::AQ_OUTPUT_STATE_BUFFER | COutputState::AQ_OUTPUT_STATE_DAMAGE | COutputState::AQ_OUTPUT_STATE_EXPLICIT_IN_FENCE | COutputState::AQ_OUTPUT_STATE_CURSOR_POS;
+    const auto&        STATE            = SNAPSHOT.state();
+    const auto         COMMITTED        = STATE.committed;
+    constexpr uint32_t ASYNC_PROPERTIES = COutputState::AQ_OUTPUT_STATE_BUFFER | COutputState::AQ_OUTPUT_STATE_DAMAGE | COutputState::AQ_OUTPUT_STATE_EXPLICIT_IN_FENCE |
+        COutputState::AQ_OUTPUT_STATE_CURSOR_POS | COutputState::AQ_OUTPUT_STATE_PRESENTATION_MODE;
 
     if (!(COMMITTED & COutputState::AQ_OUTPUT_STATE_BUFFER) || (COMMITTED & ~ASYNC_PROPERTIES) || SNAPSHOT.needsReconfig() || lastCommitNoBuffer)
         return {.error = ENOTSUP};
