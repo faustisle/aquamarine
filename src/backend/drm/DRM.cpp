@@ -2567,6 +2567,14 @@ bool Aquamarine::CDRMOutput::prepareAsyncCommitData(const COutputState::CSnapsho
     data.test      = false;
     data.enabled   = true;
     data.committed = STATE.committed;
+
+    // A hidden cursor has no plane geometry to update. Keeping CURSOR_POS in
+    // the commit would make addConnectorCursor emit cursor-plane properties
+    // for a plane that is supposed to stay off (and, for async commits, drag
+    // the cursor plane into a flip the kernel cannot do asynchronously).
+    if (!data.cursorVisible)
+        data.committed &= ~COutputState::AQ_OUTPUT_STATE_CURSOR_POS;
+
     if (mgpuFence.isValid())
         data.committed |= COutputState::AQ_OUTPUT_STATE_EXPLICIT_IN_FENCE;
     data.flags = DRM_MODE_PAGE_FLIP_EVENT;
@@ -3199,6 +3207,16 @@ void Aquamarine::CDRMOutput::dropUnsupportedAsyncFlag(SDRMConnectorCommitData& d
             data.flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
             return;
         }
+
+        // Plenty of drm planes (the i915 cursor plane in particular) cannot
+        // take part in an async flip at all: the kernel rejects the whole
+        // commit with EINVAL. Do not trade a whole frame (and a retry storm)
+        // for a cursor move, just present this one synchronously. A stationary
+        // cursor does not commit CURSOR_POS, so tearing resumes next frame.
+        if (data.cursorVisible && (data.committed & (COutputState::AQ_OUTPUT_STATE_CURSOR_POS | COutputState::AQ_OUTPUT_STATE_CURSOR_SHAPE))) {
+            data.flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
+            return;
+        }
     }
 
     const auto ATTRS = data.mainFB->buffer->dmabuf();
@@ -3450,7 +3468,28 @@ std::vector<SDRMFormat> Aquamarine::CDRMOutput::getRenderFormats() {
 }
 
 bool Aquamarine::CDRMOutput::pendingPageFlip() {
-    return connector->sched.frameInFlight();
+    if (!connector->sched.frameInFlight())
+        return false;
+
+    // A page-flip completion event that never arrives (lost interrupt, driver
+    // bug, flip dropped by the kernel) would otherwise wedge the output: the
+    // compositor keeps waiting for a completion that cannot happen, and every
+    // commit bounces off the "flip awaiting" check.
+    if (!connector->crtc || !connector->crtc->pendingFlipOverdue())
+        return true;
+
+    if (pendingAsyncCommit) {
+        // Async commits are tracked by an id in the consumer: fail that frame
+        // now so it can be re-rendered, instead of leaving it pending forever.
+        backend->log(AQ_LOG_WARNING, std::format("drm: page-flip on {} never completed, discarding it", name));
+        connector->invalidateFrame();
+        return false;
+    }
+
+    // Synchronous commits carry no id to fail. Just report the output as free;
+    // the next commit drops the stale flip itself (commitState has the same
+    // overdue check) and takes over the CRTC.
+    return false;
 }
 
 bool Aquamarine::CDRMOutput::pendingIdleFrame() {
