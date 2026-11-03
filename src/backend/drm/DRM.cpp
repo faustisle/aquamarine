@@ -3173,6 +3173,10 @@ bool Aquamarine::CDRMOutput::supportsTearing() const {
     return backend && backend->drmProps.supportsAsyncCommit && backend->atomic;
 }
 
+uint64_t Aquamarine::CDRMOutput::asyncFlipDrops() const {
+    return asyncDrops;
+}
+
 void Aquamarine::CDRMOutput::setPipelinedFrames(bool v) {
     if (!connector)
         return;
@@ -3231,13 +3235,16 @@ void Aquamarine::CDRMOutput::dropUnsupportedAsyncFlag(SDRMConnectorCommitData& d
             return;
         }
 
-        // Plenty of drm planes (the i915 cursor plane in particular) cannot
-        // take part in an async flip at all: the kernel rejects the whole
-        // commit with EINVAL. Do not trade a whole frame (and a retry storm)
-        // for a cursor move, just present this one synchronously. A stationary
-        // cursor does not commit CURSOR_POS, so tearing resumes next frame.
+        // Plenty of drm planes (the i915 cursor plane in particular) cannot take
+        // part in an async flip at all: the kernel rejects the whole commit with
+        // EINVAL. A cursor position update is a recurring event (the pointer moves
+        // on almost every frame during interaction), so presenting those frames
+        // synchronously silently turns tearing back into vsync. Leave the cursor
+        // plane untouched for this frame instead: it keeps its previous position
+        // and catches up on the next commit that can carry it, while the torn
+        // frame still contains the up to date cursor in software.
         if (data.cursorVisible && (data.committed & (COutputState::AQ_OUTPUT_STATE_CURSOR_POS | COutputState::AQ_OUTPUT_STATE_CURSOR_SHAPE))) {
-            dropAsyncFlip(data, "cursor moved");
+            data.committed &= ~(COutputState::AQ_OUTPUT_STATE_CURSOR_POS | COutputState::AQ_OUTPUT_STATE_CURSOR_SHAPE);
             return;
         }
     }
@@ -3371,7 +3378,21 @@ Aquamarine::IOutput::SCommitSubmission Aquamarine::CDRMOutput::commitAsync(const
         const auto COMMIT_ID = backend->commitThread->nextCommitID();
         connector->crtc->armPageFlip(connector, asyncDataPtr->tearing, asyncDataPtr->flipID, COMMIT_ID, false);
 
-        const auto RESULT = asyncDataPtr->submit(backend->gpu->fd, COMMIT_ID);
+        auto RESULT = asyncDataPtr->submit(backend->gpu->fd, COMMIT_ID);
+
+        // The kernel rejects an async flip outright when any part of the commit
+        // is not allowed to change asynchronously (a plane we could not predict,
+        // a pixel format corner case, a stale per-plane property). Failing here
+        // drops the whole frame, which is far worse than presenting it one
+        // refresh late. Retry the exact same commit synchronously, and say why.
+        if (!RESULT.submitted && RESULT.error == EINVAL && (asyncDataPtr->commitData.flags & DRM_MODE_PAGE_FLIP_ASYNC)) {
+            dropAsyncFlip(asyncDataPtr->commitData, "kernel rejected the asynchronous flip (EINVAL)");
+            asyncDataPtr->flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
+            asyncDataPtr->tearing = false;
+            connector->crtc->armPageFlip(connector, false, asyncDataPtr->flipID, COMMIT_ID, false);
+            RESULT = asyncDataPtr->submit(backend->gpu->fd, COMMIT_ID);
+        }
+
         if (!RESULT.submitted) {
             connector->crtc->disarmPageFlip();
             atomicImpl->finalizeAsync(*asyncDataPtr->request, connector, asyncDataPtr->commitData, false);

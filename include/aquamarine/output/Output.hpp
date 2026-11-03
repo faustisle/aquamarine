@@ -265,7 +265,12 @@ namespace Aquamarine {
         virtual bool supportsTearing() const;
         // Whether a buffer with the given format/modifier can be presented
         // asynchronously. modifier may be DRM_FORMAT_MOD_INVALID to match any.
-        virtual bool              supportsTearingFormat(uint32_t drmFormat, uint64_t modifier = DRM_FORMAT_MOD_INVALID) const;
+        virtual bool supportsTearingFormat(uint32_t drmFormat, uint64_t modifier = DRM_FORMAT_MOD_INVALID) const;
+        // How many commits that asked for an asynchronous flip had to give it
+        // up. A non-zero value means frames that were meant to tear are being
+        // paced to vblank instead, which is otherwise invisible to the
+        // compositor.
+        virtual uint64_t asyncFlipDrops() const;
         // Allow frame events while a queued commit is still in flight. The
         // compositor must then hold back the next commit until the flip
         // completes; it is used to render the next frame during the current one.

@@ -262,6 +262,7 @@ namespace Aquamarine {
         virtual SCommitSubmission                                         commitAsync(const SCommitOptions& options);
         virtual bool                                                      supportsTearing() const;
         virtual bool                                                      supportsTearingFormat(uint32_t drmFormat, uint64_t modifier = DRM_FORMAT_MOD_INVALID) const;
+        virtual uint64_t                                                  asyncFlipDrops() const;
         virtual void                                                      setPipelinedFrames(bool v);
         void                                                              releaseMgpuResources();
 

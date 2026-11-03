@@ -38,6 +38,10 @@ bool Aquamarine::IOutput::supportsTearingFormat(uint32_t drmFormat, uint64_t mod
     return false;
 }
 
+uint64_t Aquamarine::IOutput::asyncFlipDrops() const {
+    return 0;
+}
+
 void Aquamarine::IOutput::setPipelinedFrames(bool v) {
     ;
 }
