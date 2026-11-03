@@ -11,6 +11,8 @@
 #include <xf86drmMode.h>
 #include <memory>
 #include <optional>
+#include <chrono>
+#include <string>
 
 namespace Aquamarine {
     class CDRMBackend;
@@ -280,6 +282,7 @@ namespace Aquamarine {
         bool prepareAsyncCommitData(const COutputState::CSnapshot& snapshot, SDRMConnectorCommitData& data, Hyprutils::OS::CFileDescriptor& mgpuFence, bool& mgpuAcquired,
                                     bool& requiresSync);
         void dropUnsupportedAsyncFlag(SDRMConnectorCommitData& data);
+        void dropAsyncFlip(SDRMConnectorCommitData& data, const std::string& reason);
 
         Hyprutils::Memory::CWeakPointer<CDRMBackend>                 backend;
         Hyprutils::Memory::CSharedPointer<SDRMConnector>             connector;
@@ -292,8 +295,14 @@ namespace Aquamarine {
             Hyprutils::Memory::CSharedPointer<CSwapchain> cursorSwapchain;
         } mgpu;
 
-        bool                                                               lastCommitNoBuffer           = true;
-        bool                                                               warnedUnsupportedAsyncFormat = false;
+        bool lastCommitNoBuffer           = true;
+        bool warnedUnsupportedAsyncFormat = false;
+        // Why the last tearing commit had to be presented synchronously, and when
+        // that was last logged. Losing the async flag silently turns a torn frame
+        // into a vblank-paced one, which is invisible without this.
+        std::string                                                        lastAsyncDropReason;
+        std::chrono::steady_clock::time_point                              lastAsyncDropLog;
+        uint64_t                                                           asyncDrops   = 0;
         uint64_t                                                           asyncOwnerID = 0, pendingAsyncCommit = 0;
         bool                                                               asyncCommitEventPending = false;
         Hyprutils::Memory::CAtomicSharedPointer<CDRMCursorPositionMailbox> cursorMailbox;

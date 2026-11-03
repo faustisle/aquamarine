@@ -2581,8 +2581,15 @@ bool Aquamarine::CDRMOutput::prepareAsyncCommitData(const COutputState::CSnapsho
     if (STATE.presentationMode == AQ_OUTPUT_PRESENTATION_IMMEDIATE)
         data.flags |= DRM_MODE_PAGE_FLIP_ASYNC;
     dropUnsupportedAsyncFlag(data);
-    if (STATE.committed & COutputState::AQ_OUTPUT_STATE_DAMAGE)
-        data.damage = STATE.damage.copy();
+
+    // Asynchronous flips only rewrite the surface address: drivers ignore the
+    // requested damage for them. Forwarding it anyway makes aquamarine create
+    // and destroy an fb_damage_clips property blob on every torn frame (two
+    // ioctls plus a kernel allocation) and drags one more property through the
+    // atomic check. The tearing path is the latency-critical one, so keep its
+    // commit as small as possible.
+    data.committed &= ~COutputState::AQ_OUTPUT_STATE_DAMAGE;
+
     if (MODE->modeInfo)
         data.modeInfo = *MODE->modeInfo;
     else
@@ -3186,6 +3193,22 @@ bool Aquamarine::CDRMOutput::supportsTearingFormat(uint32_t drmFormat, uint64_t 
     });
 }
 
+void Aquamarine::CDRMOutput::dropAsyncFlip(SDRMConnectorCommitData& data, const std::string& reason) {
+    data.flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
+    ++asyncDrops;
+
+    // Silent in the kernel: this frame is now paced to vblank. Report it, but
+    // throttle hard enough that a permanently degraded format or cursor does
+    // not flood the log.
+    const auto NOW = std::chrono::steady_clock::now();
+    if (reason == lastAsyncDropReason && NOW - lastAsyncDropLog < std::chrono::seconds(1))
+        return;
+
+    lastAsyncDropReason = reason;
+    lastAsyncDropLog    = NOW;
+    backend->log(AQ_LOG_DEBUG, std::format("drm: tearing commit on {} degraded to a synchronous flip ({} drops so far): {}", name, asyncDrops, reason));
+}
+
 void Aquamarine::CDRMOutput::dropUnsupportedAsyncFlag(SDRMConnectorCommitData& data) {
     if (!(data.flags & DRM_MODE_PAGE_FLIP_ASYNC))
         return;
@@ -3193,7 +3216,7 @@ void Aquamarine::CDRMOutput::dropUnsupportedAsyncFlag(SDRMConnectorCommitData& d
     // A modeset (or a disable) reprograms the CRTC. The kernel rejects async
     // flips on such commits, and there is nothing to tear anyway.
     if (!data.mainFB || !data.enabled || data.modeset) {
-        data.flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
+        dropAsyncFlip(data, "modeset or no framebuffer");
         return;
     }
 
@@ -3204,7 +3227,7 @@ void Aquamarine::CDRMOutput::dropUnsupportedAsyncFlag(SDRMConnectorCommitData& d
         const bool CUR_CURSOR_PLANE  = connector->crtc->cursor->front && !connector->crtc->cursor->front->dead;
         const bool NEXT_CURSOR_PLANE = data.cursorVisible && data.cursorFB && !data.cursorFB->dead;
         if (CUR_CURSOR_PLANE != NEXT_CURSOR_PLANE) {
-            data.flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
+            dropAsyncFlip(data, "cursor plane toggled");
             return;
         }
 
@@ -3214,7 +3237,7 @@ void Aquamarine::CDRMOutput::dropUnsupportedAsyncFlag(SDRMConnectorCommitData& d
         // for a cursor move, just present this one synchronously. A stationary
         // cursor does not commit CURSOR_POS, so tearing resumes next frame.
         if (data.cursorVisible && (data.committed & (COutputState::AQ_OUTPUT_STATE_CURSOR_POS | COutputState::AQ_OUTPUT_STATE_CURSOR_SHAPE))) {
-            data.flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
+            dropAsyncFlip(data, "cursor moved");
             return;
         }
     }
@@ -3228,7 +3251,7 @@ void Aquamarine::CDRMOutput::dropUnsupportedAsyncFlag(SDRMConnectorCommitData& d
     if (PLANE && PLANE->front && PLANE->front->buffer) {
         const auto FRONT_ATTRS = PLANE->front->buffer->dmabuf();
         if (FRONT_ATTRS.success && ATTRS.success && (FRONT_ATTRS.format != ATTRS.format || FRONT_ATTRS.modifier != ATTRS.modifier)) {
-            data.flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
+            dropAsyncFlip(data, "scanout format changed");
             return;
         }
     }
@@ -3238,7 +3261,7 @@ void Aquamarine::CDRMOutput::dropUnsupportedAsyncFlag(SDRMConnectorCommitData& d
         return;
     }
 
-    data.flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
+    dropAsyncFlip(data, std::format("format {} (mod {}) is not async-flip capable", fourccToName(ATTRS.format), drmModifierToName(ATTRS.modifier)));
 
     if (!warnedUnsupportedAsyncFormat) {
         backend->log(
