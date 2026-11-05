@@ -131,25 +131,64 @@ bool Aquamarine::CBackend::start() {
         return SBackendImplementationOptions{};
     };
 
-    for (size_t i = 0; i < implementations.size(); ++i) {
-        const auto& impl = implementations.at(i);
-        const bool  ok   = impl->start();
+    auto isFallback = [&optionsForType](const SP<IBackendImplementation>& impl) { return optionsForType(impl->type()).backendRequestMode == AQ_BACKEND_REQUEST_FALLBACK; };
 
-        if (!ok) {
-            log(AQ_LOG_ERROR, std::format("Requested backend ({}) could not start, enabling fallbacks", backendTypeToName(impl->type())));
-            if (optionsForType(impl->type()).backendRequestMode == AQ_BACKEND_REQUEST_MANDATORY) {
-                log(AQ_LOG_CRITICAL, std::format("Requested backend ({}) could not start and it's mandatory, cannot continue!", backendTypeToName(impl->type())));
+    // Returns false only for a mandatory backend that failed to start, in which
+    // case the whole backend cannot come up.
+    auto startOne = [this, &optionsForType, &started](const SP<IBackendImplementation>& impl) -> bool {
+        if (impl->start()) {
+            started++;
+            return true;
+        }
+
+        log(AQ_LOG_ERROR, std::format("Requested backend ({}) could not start, enabling fallbacks", backendTypeToName(impl->type())));
+        if (optionsForType(impl->type()).backendRequestMode == AQ_BACKEND_REQUEST_MANDATORY) {
+            log(AQ_LOG_CRITICAL, std::format("Requested backend ({}) could not start and it's mandatory, cannot continue!", backendTypeToName(impl->type())));
+            return false;
+        }
+
+        return true;
+    };
+
+    // Start the backends that are meant to be used before the fallbacks. A
+    // fallback running next to a real backend is not a harmless extra: the
+    // Wayland backend would connect to whatever compositor happens to own the
+    // socket and create a phantom output that steals windows and workspace
+    // space while having no display behind it.
+    for (const auto& impl : implementations) {
+        if (isFallback(impl))
+            continue;
+
+        if (!startOne(impl)) {
+            implementations.clear();
+            return false;
+        }
+    }
+
+    // Fallbacks are only there for the case where nothing else came up.
+    bool usedFallbacks = false;
+    if (started == 0) {
+        usedFallbacks = true;
+        for (const auto& impl : implementations) {
+            if (!isFallback(impl))
+                continue;
+
+            if (!startOne(impl)) {
                 implementations.clear();
                 return false;
             }
-        } else
-            started++;
+        }
     }
 
     if (implementations.empty() || started <= 0) {
         log(AQ_LOG_CRITICAL, "No backend could be opened. Make sure there was a correct backend passed to CBackend, and that your environment supports at least one of them.");
         return false;
     }
+
+    // A fallback that was never started is dropped silently: it did not fail,
+    // it was simply not needed.
+    if (!usedFallbacks)
+        std::erase_if(implementations, [&isFallback](const auto& impl) { return isFallback(impl); });
 
     // erase failed impls
     std::erase_if(implementations, [this](const auto& i) {
