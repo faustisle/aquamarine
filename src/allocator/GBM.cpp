@@ -297,7 +297,7 @@ bool Aquamarine::CGBMBuffer::isSynchronous() {
 }
 
 bool Aquamarine::CGBMBuffer::good() {
-    return bo;
+    return bo && attrs.success;
 }
 
 SDMABUFAttrs Aquamarine::CGBMBuffer::dmabuf() {

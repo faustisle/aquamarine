@@ -32,28 +32,33 @@ bool Aquamarine::CSwapchain::reconfigure(const SSwapchainOptions& options_) {
     }
 
     // tearing changes which modifiers are usable, so it needs a real reallocation
-    const bool ALLOCATION_CHANGED = options_.tearing != options.tearing;
+    const bool ALLOCATION_CHANGED = options_.tearing != options.tearing ||
+        options_.scanout != options.scanout || options_.cursor != options.cursor || options_.multigpu != options.multigpu ||
+        options_.scanoutOutput.lock() != options.scanoutOutput.lock();
 
-    if (!ALLOCATION_CHANGED && (options_.format == options.format || options_.format == DRM_FORMAT_INVALID) && options_.size == options.size && options_.length == options.length &&
-        buffers.size() == options.length)
+    const bool SAME_ALLOCATION = (options_.format == options.format || options_.format == DRM_FORMAT_INVALID) && options_.size == options.size && !ALLOCATION_CHANGED;
+
+    if (SAME_ALLOCATION && options_.length == options.length && buffers.size() == options.length)
         return true; // no need to reconfigure
 
-    if (!ALLOCATION_CHANGED && (options_.format == options.format || options_.format == DRM_FORMAT_INVALID) && options_.size == options.size) {
+    if (SAME_ALLOCATION) {
         bool ok = resize(options_.length);
         if (!ok)
             return false;
 
-        options = options_;
+        options.length = options_.length;
 
         allocator->getBackend()->log(AQ_LOG_DEBUG, std::format("Swapchain: Resized a {} {} swapchain to length {}", options.size, fourccToName(options.format), options.length));
         return true;
     }
 
-    bool ok = fullReconfigure(options_);
-    if (!ok)
+    const auto PREVIOUS_OPTIONS = options;
+    options                     = options_;
+    if (!fullReconfigure(options_)) {
+        options = PREVIOUS_OPTIONS;
         return false;
+    }
 
-    options = options_;
     if (options.format == DRM_FORMAT_INVALID)
         options.format = buffers.at(0)->dmabuf().format;
 
