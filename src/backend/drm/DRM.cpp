@@ -1705,7 +1705,7 @@ static bool parsePlaneFormatModifiers(int fd, uint32_t blobID, std::vector<SDRMF
 
         if (it == out.end())
             out.emplace_back(SDRMFormat{.drmFormat = iter.fmt, .modifiers = {iter.mod}});
-        else
+        else if (std::ranges::find(it->modifiers, iter.mod) == it->modifiers.end())
             it->modifiers.emplace_back(iter.mod);
     }
 
