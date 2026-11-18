@@ -55,7 +55,12 @@ if(CMAKE_BUILD_TYPE MATCHES Debug OR CMAKE_BUILD_TYPE MATCHES DEBUG)
   add_compile_definitions(AQUAMARINE_DEBUG)
 else()
   add_compile_options(-O3)
-  message(STATUS "Configuring aquamarine in Release")
+  # Personal, machine-local build: tune for the host CPU and drop unused code.
+  add_compile_options(
+    -march=native -mtune=native -pipe -fno-plt -fomit-frame-pointer
+    -fno-semantic-interposition -ffunction-sections -fdata-sections)
+  add_link_options(-Wl,-O1,--gc-sections,--as-needed,-z,now)
+  message(STATUS "Configuring aquamarine in Release (native, gc-sections)")
 endif()
 
 file(GLOB_RECURSE SRCFILES CONFIGURE_DEPENDS "src/*.cpp" "include/*.hpp")
