@@ -2820,8 +2820,7 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
 
             if (!drmFB && EVDI && backend->dumbAllocator) {
                 if (!backend->cpuCopyFallback) {
-                    backend->backend->log(AQ_LOG_DEBUG,
-                                          std::format("drm: direct KMS import of primary buffer failed on {}, switching to dumb-buffer CPU copy", backend->gpuName));
+                    backend->backend->log(AQ_LOG_DEBUG, std::format("drm: direct KMS import of primary buffer failed on {}, switching to dumb-buffer CPU copy", backend->gpuName));
                     backend->cpuCopyFallback = true;
                 }
 
@@ -3169,7 +3168,7 @@ std::optional<std::chrono::steady_clock::time_point> Aquamarine::CDRMOutput::nex
     const auto& STATE = state->state();
 
     if (state->needsReconfig() || (STATE.committed & (COutputState::AQ_OUTPUT_STATE_ADAPTIVE_SYNC | COutputState::AQ_OUTPUT_STATE_PRESENTATION_MODE)) || !STATE.enabled ||
-        STATE.adaptiveSync || STATE.presentationMode != AQ_OUTPUT_PRESENTATION_VSYNC)
+        STATE.adaptiveSync || (STATE.presentationMode != AQ_OUTPUT_PRESENTATION_VSYNC && STATE.presentationMode != AQ_OUTPUT_PRESENTATION_IMMEDIATE))
         return std::nullopt;
 
     const auto REFRESH_PERIOD = std::chrono::nanoseconds{1'000'000'000'000LL / connector->refresh};
