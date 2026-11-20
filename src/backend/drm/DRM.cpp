@@ -3168,7 +3168,7 @@ std::optional<std::chrono::steady_clock::time_point> Aquamarine::CDRMOutput::nex
     const auto& STATE = state->state();
 
     if (state->needsReconfig() || (STATE.committed & (COutputState::AQ_OUTPUT_STATE_ADAPTIVE_SYNC | COutputState::AQ_OUTPUT_STATE_PRESENTATION_MODE)) || !STATE.enabled ||
-        STATE.adaptiveSync || (STATE.presentationMode != AQ_OUTPUT_PRESENTATION_VSYNC && STATE.presentationMode != AQ_OUTPUT_PRESENTATION_IMMEDIATE))
+        STATE.adaptiveSync || STATE.presentationMode != AQ_OUTPUT_PRESENTATION_VSYNC)
         return std::nullopt;
 
     const auto REFRESH_PERIOD = std::chrono::nanoseconds{1'000'000'000'000LL / connector->refresh};
